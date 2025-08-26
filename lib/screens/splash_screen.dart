@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
@@ -10,15 +12,37 @@ class SplashScreen extends StatefulWidget {
 }
 
 class _SplashScreenState extends State<SplashScreen> {
+  final _storage = const FlutterSecureStorage();
+
   @override
   void initState() {
     super.initState();
-    // **CHANGED**: Navigate to the onboarding screen after 6 seconds
-    Timer(const Duration(seconds: 6), () {
-      if (mounted) {
-        Navigator.of(context).pushReplacementNamed('/onboarding');
+    // Start the process to check login status after a short delay
+    Timer(const Duration(seconds: 3), _checkAuthStatus);
+  }
+
+  Future<void> _checkAuthStatus() async {
+    // Check for a valid authentication token
+    final String? token = await _storage.read(key: 'auth_token');
+
+    if (mounted) {
+      if (token != null) {
+        // If token exists, user is logged in. Go to Dashboard.
+        Navigator.of(context).pushReplacementNamed('/dashboard');
+      } else {
+        // If no token, check if user has seen onboarding before.
+        final prefs = await SharedPreferences.getInstance();
+        final bool hasSeenOnboarding = prefs.getBool('onboarding_complete') ?? false;
+
+        if (hasSeenOnboarding) {
+          // If they've seen onboarding, go straight to sign-in.
+          Navigator.of(context).pushReplacementNamed('/signin');
+        } else {
+          // If it's their first time, show onboarding.
+          Navigator.of(context).pushReplacementNamed('/onboarding');
+        }
       }
-    });
+    }
   }
 
   @override
@@ -29,10 +53,9 @@ class _SplashScreenState extends State<SplashScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // **CHANGED**: Replaced SVG with your GIF asset
             Image.asset(
               'assets/images/riding.gif',
-              width: 300, // You can adjust the size as needed
+              width: 300,
               height: 300,
             ),
             const SizedBox(height: 16),

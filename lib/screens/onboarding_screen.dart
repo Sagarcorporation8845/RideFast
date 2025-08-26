@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // Data model for each onboarding page
 class OnboardingItem {
@@ -42,6 +43,18 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       description: 'Live tracking, emergency alerts, and verified drivers.',
     ),
   ];
+
+  // **THE FIX IS HERE**: This function handles the final step
+  void _completeOnboarding() async {
+    // Save a flag indicating that onboarding is complete
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool('onboarding_complete', true);
+
+    // Navigate to the sign-in screen
+    if (mounted) {
+      Navigator.of(context).pushReplacementNamed('/signin');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -86,8 +99,8 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
                 child: ElevatedButton(
                   onPressed: () {
                     if (_currentPage == _onboardingData.length - 1) {
-                      // Navigate to Sign In screen
-                      Navigator.of(context).pushReplacementNamed('/signin');
+                      // **Call the new function here**
+                      _completeOnboarding();
                     } else {
                       _pageController.nextPage(
                         duration: const Duration(milliseconds: 400),

@@ -12,6 +12,8 @@ import 'package:ridefast/screens/scheduled_bookings_screen.dart';
 import 'package:ridefast/screens/support_screen.dart';
 import 'package:ridefast/screens/settings_screen.dart';
 import 'package:ridefast/screens/about_us_screen.dart';
+import 'package:ridefast/screens/profile_completion_screen.dart';
+import 'package:ridefast/screens/edit_profile_screen.dart';
 
 Future<void> main() async {
   await dotenv.load(fileName: ".env");
@@ -36,6 +38,7 @@ class MyApp extends StatelessWidget {
         '/onboarding': (context) => const OnboardingScreen(),
         '/signin': (context) => const SignInScreen(),
         '/otp': (context) => const OTPScreen(),
+        '/complete-profile': (context) => const ProfileCompletionScreen(), 
         '/dashboard': (context) => const DashboardScreen(),
         '/search': (context) => const LocationSearchScreen(),
         '/rides': (context) => const YourRidesScreen(),
@@ -44,6 +47,7 @@ class MyApp extends StatelessWidget {
         '/support': (context) => const SupportScreen(),
         '/settings': (context) => const SettingsScreen(),
         '/about': (context) => const AboutUsScreen(), // 2. Add the new route
+        '/edit-profile': (context) => const EditProfileScreen(),
       },
     );
   }

@@ -18,6 +18,10 @@ dependencies:
   dio: ^5.4.1
   flutter_dotenv: ^5.1.0
   flutter_polyline_points: ^2.0.0 # Add this line
+  flutter_secure_storage: ^9.0.0
+  shared_preferences: ^2.2.2 # Add this line
+
+
 
 dev_dependencies:
   flutter_test:

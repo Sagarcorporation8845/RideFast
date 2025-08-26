@@ -1,8 +1,53 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_fonts/google_fonts.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
-class MainDrawer extends StatelessWidget {
+// **CHANGED**: Converted to a StatefulWidget to manage user data
+class MainDrawer extends StatefulWidget {
   const MainDrawer({super.key});
+
+  @override
+  State<MainDrawer> createState() => _MainDrawerState();
+}
+
+class _MainDrawerState extends State<MainDrawer> {
+  String _userName = "Guest"; // Default name
+
+  @override
+  void initState() {
+    super.initState();
+    _loadUserData();
+  }
+
+  // **NEW**: Function to load user data from SharedPreferences
+  Future<void> _loadUserData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final String? userDataString = prefs.getString('user_profile');
+
+    if (userDataString != null) {
+      final Map<String, dynamic> userData = jsonDecode(userDataString);
+      // The key from your backend is 'full_name'
+      setState(() {
+        _userName = userData['full_name'] ?? "Guest";
+      });
+    }
+  }
+
+  void _logout(BuildContext context) async {
+    final storage = const FlutterSecureStorage();
+    final prefs = await SharedPreferences.getInstance();
+
+    // Clear all saved authentication and user data
+    await storage.delete(key: 'auth_token');
+    await prefs.remove('user_profile');
+
+    // Navigate to the sign-in screen and remove all previous screens from the stack
+    if (Navigator.of(context).mounted) {
+      Navigator.of(context).pushNamedAndRemoveUntil('/signin', (route) => false);
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -46,21 +91,21 @@ class MainDrawer extends StatelessWidget {
           _buildDrawerItem(
             icon: Icons.payment,
             text: 'Payments',
-            onTap: () => _navigateTo(context, '/payments'),
+            onTap: () {}, // TODO: Add payments route
             iconColor: iconColor,
             textColor: textColor,
           ),
           _buildDrawerItem(
             icon: Icons.account_balance_wallet_outlined,
             text: 'RideFast Wallet',
-            onTap: () => _navigateTo(context, '/wallet'),
+            onTap: () {}, // TODO: Add wallet route
             iconColor: iconColor,
             textColor: textColor,
           ),
           _buildDrawerItem(
             icon: Icons.local_offer_outlined,
             text: 'Promotions',
-            onTap: () => _navigateTo(context, '/promotions'),
+            onTap: () {}, // TODO: Add promotions route
             iconColor: iconColor,
             textColor: textColor,
           ),
@@ -95,10 +140,7 @@ class MainDrawer extends StatelessWidget {
           _buildDrawerItem(
             icon: Icons.logout,
             text: 'Logout',
-            onTap: () {
-              // Handle logout logic
-              Navigator.of(context).pushReplacementNamed('/signin');
-            },
+            onTap: () => _logout(context),
             iconColor: iconColor,
             textColor: textColor,
           ),
@@ -111,14 +153,15 @@ class MainDrawer extends StatelessWidget {
   Widget _buildDrawerHeader(Color primaryColor) {
     return UserAccountsDrawerHeader(
       accountName: Text(
-        "Hi Sagar!",
+        // **CHANGED**: Using the dynamic user name
+        "Hi $_userName!",
         style: GoogleFonts.plusJakartaSans(
           fontWeight: FontWeight.bold,
           fontSize: 22,
         ),
       ),
       accountEmail: Text(
-        "View and edit profile", // Subtitle to encourage interaction
+        "View and edit profile",
         style: GoogleFonts.plusJakartaSans(
           fontSize: 14,
           color: Colors.white70,
@@ -157,12 +200,10 @@ class MainDrawer extends StatelessWidget {
     );
   }
 
-  // **FIX IS HERE**
   // Helper method for navigation
   void _navigateTo(BuildContext context, String routeName) {
     // Closes the drawer first
     Navigator.pop(context);
-    // **CHANGED**: Added the actual navigation command
     Navigator.pushNamed(context, routeName);
   }
 }
