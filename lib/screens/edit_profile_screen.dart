@@ -20,27 +20,59 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
   DateTime? _dateOfBirth;
   String? _selectedGender;
   bool _isLoading = false;
+  bool _isFetching = true; // New state to track initial data fetch
   final _storage = const FlutterSecureStorage();
 
   @override
   void initState() {
     super.initState();
-    _loadUserProfile();
+    _fetchAndLoadUserProfile();
   }
 
-  Future<void> _loadUserProfile() async {
-    final prefs = await SharedPreferences.getInstance();
-    final String? userDataString = prefs.getString('user_profile');
+  // **THE FIX IS HERE**: This function now calls the GET /profile API
+  Future<void> _fetchAndLoadUserProfile() async {
+    setState(() {
+      _isFetching = true;
+    });
 
-    if (userDataString != null) {
-      final Map<String, dynamic> userData = jsonDecode(userDataString);
-      _fullNameController.text = userData['full_name'] ?? '';
-      _emailController.text = userData['email'] ?? '';
-      _selectedGender = userData['gender'];
-      if (userData['date_of_birth'] != null) {
-        _dateOfBirth = DateTime.parse(userData['date_of_birth']);
+    final dio = Dio();
+    final apiUrl = dotenv.env['API_URL'];
+    final token = await _storage.read(key: 'auth_token');
+
+    try {
+      final response = await dio.get(
+        '$apiUrl/profile',
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+
+      if (response.statusCode == 200) {
+        final userData = response.data['user'];
+        // Save the latest profile data locally
+        await _saveUserDataLocally(userData);
+
+        // Populate the form fields with the fetched data
+        _fullNameController.text = userData['full_name'] ?? '';
+        _emailController.text = userData['email'] ?? '';
+        _selectedGender = userData['gender'];
+        if (userData['date_of_birth'] != null) {
+          _dateOfBirth = DateTime.parse(userData['date_of_birth']);
+        }
       }
-      setState(() {});
+    } on DioException catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(e.response?.data['message'] ?? 'Failed to load profile.'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isFetching = false;
+        });
+      }
     }
   }
 
@@ -167,72 +199,73 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
         title: Text('Edit Profile', style: GoogleFonts.plusJakartaSans(fontWeight: FontWeight.bold)),
         centerTitle: true,
       ),
-      body: SingleChildScrollView(
-        padding: const EdgeInsets.all(24.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // ... UI elements are the same as profile completion ...
-              TextFormField(
-                controller: _fullNameController,
-                decoration: inputDecorationTheme.copyWith(labelText: 'Full Name'),
-                validator: (value) => value!.isEmpty ? 'Please enter your name' : null,
-              ),
-              const SizedBox(height: 20),
-              TextFormField(
-                controller: _emailController,
-                decoration: inputDecorationTheme.copyWith(labelText: 'Email Address'),
-                keyboardType: TextInputType.emailAddress,
-                validator: (value) {
-                  if (value!.isEmpty) return 'Please enter your email';
-                  if (!RegExp(r'\S+@\S+\.\S+').hasMatch(value)) return 'Please enter a valid email';
-                  return null;
-                },
-              ),
-              const SizedBox(height: 20),
-              DropdownButtonFormField<String>(
-                value: _selectedGender,
-                decoration: inputDecorationTheme.copyWith(labelText: 'Gender'),
-                items: ['Male', 'Female', 'Other'].map((String value) {
-                  return DropdownMenuItem<String>(value: value, child: Text(value));
-                }).toList(),
-                onChanged: (newValue) => setState(() => _selectedGender = newValue),
-                validator: (value) => value == null ? 'Please select your gender' : null,
-              ),
-              const SizedBox(height: 20),
-              TextFormField(
-                readOnly: true,
-                decoration: inputDecorationTheme.copyWith(
-                  labelText: 'Date of Birth',
-                  suffixIcon: Icon(Icons.calendar_today, color: Colors.grey[600]),
+      body: _isFetching
+          ? const Center(child: CircularProgressIndicator())
+          : SingleChildScrollView(
+              padding: const EdgeInsets.all(24.0),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    TextFormField(
+                      controller: _fullNameController,
+                      decoration: inputDecorationTheme.copyWith(labelText: 'Full Name'),
+                      validator: (value) => value!.isEmpty ? 'Please enter your name' : null,
+                    ),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      controller: _emailController,
+                      decoration: inputDecorationTheme.copyWith(labelText: 'Email Address'),
+                      keyboardType: TextInputType.emailAddress,
+                      validator: (value) {
+                        if (value!.isEmpty) return 'Please enter your email';
+                        if (!RegExp(r'\S+@\S+\.\S+').hasMatch(value)) return 'Please enter a valid email';
+                        return null;
+                      },
+                    ),
+                    const SizedBox(height: 20),
+                    DropdownButtonFormField<String>(
+                      value: _selectedGender,
+                      decoration: inputDecorationTheme.copyWith(labelText: 'Gender'),
+                      items: ['Male', 'Female', 'Other'].map((String value) {
+                        return DropdownMenuItem<String>(value: value, child: Text(value));
+                      }).toList(),
+                      onChanged: (newValue) => setState(() => _selectedGender = newValue),
+                      validator: (value) => value == null ? 'Please select your gender' : null,
+                    ),
+                    const SizedBox(height: 20),
+                    TextFormField(
+                      readOnly: true,
+                      decoration: inputDecorationTheme.copyWith(
+                        labelText: 'Date of Birth',
+                        suffixIcon: Icon(Icons.calendar_today, color: Colors.grey[600]),
+                      ),
+                      onTap: () => _selectDate(context),
+                      controller: TextEditingController(
+                        text: _dateOfBirth == null ? '' : "${_dateOfBirth!.toLocal()}".split(' ')[0],
+                      ),
+                      validator: (value) => _dateOfBirth == null ? 'Please select your date of birth' : null,
+                    ),
+                    const SizedBox(height: 40),
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton(
+                        onPressed: _isLoading ? null : _updateProfile,
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF27b4ad),
+                          padding: const EdgeInsets.symmetric(vertical: 18),
+                          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                        ),
+                        child: _isLoading
+                            ? const CircularProgressIndicator(color: Colors.white)
+                            : Text('Save Changes', style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                      ),
+                    ),
+                  ],
                 ),
-                onTap: () => _selectDate(context),
-                controller: TextEditingController(
-                  text: _dateOfBirth == null ? '' : "${_dateOfBirth!.toLocal()}".split(' ')[0],
-                ),
-                validator: (value) => _dateOfBirth == null ? 'Please select your date of birth' : null,
               ),
-              const SizedBox(height: 40),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _updateProfile,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF27b4ad),
-                    padding: const EdgeInsets.symmetric(vertical: 18),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                  ),
-                  child: _isLoading
-                      ? const CircularProgressIndicator(color: Colors.white)
-                      : Text('Save Changes', style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
+            ),
     );
   }
 }
