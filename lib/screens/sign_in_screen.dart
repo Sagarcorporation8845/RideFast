@@ -49,7 +49,7 @@ class _SignInScreenState extends State<SignInScreen> {
       );
 
       if (response.statusCode == 200) {
-        // Navigate to the OTP screen, passing the necessary data
+        // Navigate to the OTP screen, passing the necessary data as a Map
         final fullPhoneNumber = '$_selectedCountryCode ${_phoneController.text}';
         if (mounted) {
           Navigator.of(context).pushNamed(
@@ -183,14 +183,14 @@ class _SignInScreenState extends State<SignInScreen> {
                                   ),
                                   errorBorder: OutlineInputBorder(
                                     borderSide: BorderSide(color: Colors.red),
-                                     borderRadius: BorderRadius.only(
+                                      borderRadius: BorderRadius.only(
                                       topRight: Radius.circular(12),
                                       bottomRight: Radius.circular(12),
                                     ),
                                   ),
                                   focusedErrorBorder: OutlineInputBorder(
                                     borderSide: BorderSide(color: Colors.red, width: 2),
-                                     borderRadius: BorderRadius.only(
+                                      borderRadius: BorderRadius.only(
                                       topRight: Radius.circular(12),
                                       bottomRight: Radius.circular(12),
                                     ),
@@ -350,3 +350,4 @@ class SocialLoginButton extends StatelessWidget {
     );
   }
 }
+

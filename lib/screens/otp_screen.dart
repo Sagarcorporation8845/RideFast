@@ -1,10 +1,10 @@
 import 'dart:convert';
-import 'package:flutter/material.dart';
-import 'package:google_fonts/google_fonts.dart';
-import 'package:pinput/pinput.dart';
 import 'package:dio/dio.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:google_fonts/google_fonts.dart';
+import 'package:pinput/pinput.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 class OTPScreen extends StatefulWidget {
@@ -18,8 +18,8 @@ class _OTPScreenState extends State<OTPScreen> {
   final pinController = TextEditingController();
   final focusNode = FocusNode();
   final _formKey = GlobalKey<FormState>();
-  bool _isLoading = false;
   final _storage = const FlutterSecureStorage();
+  bool _isLoading = false;
 
   @override
   void dispose() {
@@ -28,22 +28,17 @@ class _OTPScreenState extends State<OTPScreen> {
     super.dispose();
   }
 
-  // **NEW**: Helper function to save user data locally
   Future<void> _saveUserDataLocally(Map<String, dynamic> userData) async {
     final prefs = await SharedPreferences.getInstance();
-    // The key from your backend for the user's name is 'fullName'
-    // We will ensure it's mapped to 'full_name' for consistency with the profile update screen
-    final Map<String, dynamic> formattedUserData = {
-      'full_name': userData['fullName'],
-      // Add other fields here if needed
-    };
-    await prefs.setString('user_profile', jsonEncode(formattedUserData));
+    // Ensure consistency in key naming ('fullName' from API vs 'full_name' used locally)
+    if (userData.containsKey('fullName') && !userData.containsKey('full_name')) {
+      userData['full_name'] = userData['fullName'];
+    }
+    await prefs.setString('user_profile', jsonEncode(userData));
   }
 
-  void _verifyOtp(Map<String, String> args) async {
-    // Hide keyboard
+  Future<void> _verifyOtp(Map<String, String> args) async {
     focusNode.unfocus();
-
     if (!_formKey.currentState!.validate()) {
       return;
     }
@@ -64,36 +59,44 @@ class _OTPScreenState extends State<OTPScreen> {
           'otp': pinController.text,
         },
       );
+      
+      final responseData = response.data;
+      final user = responseData['user'];
+      final List<dynamic> roles = user['roles'] ?? [];
 
-      if (response.statusCode == 200) {
-        final token = response.data['token'];
-        final isProfileComplete = response.data['isProfileComplete'] ?? false;
-        final user = response.data['user']; // Get the user object from the response
-
-        // Securely store the token
+      if (roles.contains('customer')) {
+        final token = responseData['token'];
         await _storage.write(key: 'auth_token', value: token);
 
+        final isProfileComplete = responseData['isProfileComplete'] ?? false;
+        
+        // Save user data regardless of profile completion status
+        if (user != null) {
+           await _saveUserDataLocally(user);
+        }
+
         if (mounted) {
-          if (isProfileComplete) {
-            // **THE FIX IS HERE**: If the profile is complete, we save the
-            // user data we just received from the login response.
-            if (user != null) {
-              await _saveUserDataLocally(user);
-            }
-            Navigator.of(context).pushNamedAndRemoveUntil('/dashboard', (route) => false);
+           if (isProfileComplete) {
+            Navigator.pushNamedAndRemoveUntil(context, '/dashboard', (route) => false);
           } else {
-            Navigator.of(context).pushNamedAndRemoveUntil('/complete-profile', (route) => false);
+            Navigator.pushNamedAndRemoveUntil(context, '/complete-profile', (route) => false);
           }
         }
+      } else { // User is a driver or has no customer role
+        // As per logic, treat them as a new customer user for this app
+        final token = responseData['token'];
+        await _storage.write(key: 'auth_token', value: token);
+        if (mounted) {
+          // Send them to complete profile screen
+          Navigator.pushNamedAndRemoveUntil(context, '/complete-profile', (route) => false);
+        }
       }
+
     } on DioException catch (e) {
-      final errorMessage = e.response?.data['message'] ?? 'An unknown error occurred.';
+      final errorMessage = e.response?.data['message'] ?? 'An error occurred. Please try again.';
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(errorMessage),
-            backgroundColor: Colors.red,
-          ),
+          SnackBar(content: Text(errorMessage), backgroundColor: Colors.red),
         );
       }
     } finally {
@@ -107,6 +110,7 @@ class _OTPScreenState extends State<OTPScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // Correctly receive the argument as a Map from the sign-in screen.
     final arguments = ModalRoute.of(context)?.settings.arguments as Map<String, String>;
     final String fullPhoneNumber = arguments['fullPhoneNumber'] ?? 'your number';
 
@@ -182,15 +186,9 @@ class _OTPScreenState extends State<OTPScreen> {
                       border: Border.all(color: const Color(0xFF27b4ad)),
                     ),
                   ),
-                  submittedPinTheme: defaultPinTheme,
-                  pinputAutovalidateMode: PinputAutovalidateMode.onSubmit,
-                  showCursor: true,
                   validator: (value) {
-                    if (value == null || value.isEmpty) {
-                      return 'Please enter the OTP';
-                    }
-                    if (value.length != 4) {
-                      return 'OTP must be 4 digits';
+                    if (value == null || value.length != 4) {
+                      return 'Please enter the 4-digit OTP';
                     }
                     return null;
                   },
@@ -207,17 +205,14 @@ class _OTPScreenState extends State<OTPScreen> {
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(30),
                       ),
-                      disabledBackgroundColor: Colors.grey.shade300,
+                       disabledBackgroundColor: Colors.grey.shade300,
                     ),
                     child: _isLoading
                         ? const SizedBox(
-                            height: 24,
-                            width: 24,
-                            child: CircularProgressIndicator(
-                              color: Colors.white,
-                              strokeWidth: 3,
-                            ),
-                          )
+                          height: 24,
+                          width: 24,
+                          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+                        )
                         : Text(
                             'Verify',
                             style: GoogleFonts.plusJakartaSans(
@@ -230,9 +225,8 @@ class _OTPScreenState extends State<OTPScreen> {
                 ),
                 const SizedBox(height: 24),
                 TextButton(
-                  onPressed: () {
-                    // TODO: Implement Resend OTP logic
-                    print('Resend OTP');
+                  onPressed: () { 
+                    // TODO: Implement Resend OTP logic by calling the /auth/login API again
                   },
                   child: Text(
                     "Didn't receive the code? Resend",
