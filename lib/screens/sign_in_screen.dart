@@ -41,7 +41,7 @@ class _SignInScreenState extends State<SignInScreen> {
 
     try {
       final response = await dio.post(
-        '$apiUrl/auth/login',
+        '$apiUrl/user-service/auth/login',
         data: {
           'countryCode': _selectedCountryCode,
           'phoneNumber': _phoneController.text,

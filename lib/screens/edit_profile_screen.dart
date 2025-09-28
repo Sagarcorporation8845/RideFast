@@ -41,7 +41,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     try {
       final response = await dio.get(
-        '$apiUrl/profile',
+        '$apiUrl/user-service/profile',
         options: Options(headers: {'Authorization': 'Bearer $token'}),
       );
 
@@ -136,7 +136,7 @@ class _EditProfileScreenState extends State<EditProfileScreen> {
 
     try {
       final response = await dio.put(
-        '$apiUrl/profile/update',
+        '$apiUrl/user-service/profile/update',
         data: {
           'fullName': _fullNameController.text,
           'email': _emailController.text,

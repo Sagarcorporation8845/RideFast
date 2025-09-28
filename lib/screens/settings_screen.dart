@@ -74,7 +74,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
       try {
         final response = await dio.put(
-          '$apiUrl/locations/save',
+          '$apiUrl/user-service/locations/save',
           data: {
             'type': type.toLowerCase(),
             'address': selectedAddress,

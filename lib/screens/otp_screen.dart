@@ -52,7 +52,7 @@ class _OTPScreenState extends State<OTPScreen> {
 
     try {
       final response = await dio.post(
-        '$apiUrl/auth/verify-otp',
+        '$apiUrl/user-service/auth/verify-otp',
         data: {
           'countryCode': args['countryCode'],
           'phoneNumber': args['phoneNumber'],
@@ -226,7 +226,7 @@ class _OTPScreenState extends State<OTPScreen> {
                 const SizedBox(height: 24),
                 TextButton(
                   onPressed: () { 
-                    // TODO: Implement Resend OTP logic by calling the /auth/login API again
+                    // TODO: Implement Resend OTP logic by calling the /user-service/auth/login API again
                   },
                   child: Text(
                     "Didn't receive the code? Resend",

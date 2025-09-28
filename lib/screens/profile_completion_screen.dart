@@ -85,7 +85,7 @@ class _ProfileCompletionScreenState extends State<ProfileCompletionScreen> {
 
     try {
       final response = await dio.put(
-        '$apiUrl/profile/update',
+        '$apiUrl/user-service/profile/update',
         data: {
           'fullName': _fullNameController.text,
           'email': _emailController.text,
