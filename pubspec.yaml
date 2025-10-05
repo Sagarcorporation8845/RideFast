@@ -20,6 +20,8 @@ dependencies:
   flutter_polyline_points: ^2.0.0 # Add this line
   flutter_secure_storage: ^9.0.0
   shared_preferences: ^2.2.2 # Add this line
+  uuid: ^4.1.0
+  shimmer: ^3.0.0
 
 
 

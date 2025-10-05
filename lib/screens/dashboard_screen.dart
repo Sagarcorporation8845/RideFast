@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
@@ -9,19 +8,18 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:location/location.dart';
+import 'package:ridefast/models/fare_option.dart';
 import 'package:ridefast/widgets/dashboard/location_fields.dart';
+import 'package:ridefast/widgets/dashboard/location_search_panel.dart';
 import 'package:ridefast/widgets/dashboard/service_selector.dart';
 import 'package:ridefast/widgets/dashboard/vehicle_selector.dart';
 import 'package:ridefast/widgets/main_drawer.dart';
 
-// Enums moved here to be accessible by child widgets
 enum ServiceType { ride, parcel }
-enum VehicleType { bike, auto, economy, premium, xl, parcel }
 enum LocationField { pickup, destination }
 
 class DashboardScreen extends StatefulWidget {
   const DashboardScreen({super.key});
-
   @override
   State<DashboardScreen> createState() => _DashboardScreenState();
 }
@@ -29,7 +27,6 @@ class DashboardScreen extends StatefulWidget {
 class _DashboardScreenState extends State<DashboardScreen> {
   // UI State
   ServiceType _selectedService = ServiceType.ride;
-  VehicleType? _selectedVehicle;
   final GlobalKey<ScaffoldState> _scaffoldKey = GlobalKey<ScaffoldState>();
   String _pickupLocationLabel = 'Pickup Location';
   String _destinationLabel = 'Destination';
@@ -39,34 +36,36 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final Location _locationService = Location();
   Timer? _pollingTimer;
   final Map<String, Marker> _vehicleMarkers = {};
-  bool _isFirstDriverFetch = true;
-
-  // **FIX 1**: Dedicated state for pickup and destination markers
   Marker? _pickupMarker;
   Marker? _destinationMarker;
 
+  // Mode States
+  bool _isSearchingLocation = false;
+  bool _isSelectingLocationOnMap = false;
+  LocationField? _activeField;
+
   // Pin Marker Selection State
-  bool _isSelectingLocation = false;
-  LocationField? _activeLocationField;
-  LatLng _selectedLocationOnMap = const LatLng(0, 0); // Center of map
+  LatLng _selectedLocationOnMap = const LatLng(0, 0);
   String _selectedAddressOnMap = "Move the map to select location";
   bool _isMapMoving = false;
 
-  // Custom marker icons
+  // Fare Estimation State
+  List<FareOption> _fareOptions = [];
+  FareOption? _selectedFareOption;
+  bool _isFetchingFares = false;
+  String? _fareErrorMessage;
+
+  // Services & Icons
+  final _storage = const FlutterSecureStorage();
+  final _dio = Dio();
   BitmapDescriptor _bikeMarkerIcon = BitmapDescriptor.defaultMarker;
   BitmapDescriptor _autoMarkerIcon = BitmapDescriptor.defaultMarker;
   BitmapDescriptor _carMarkerIcon = BitmapDescriptor.defaultMarker;
-  
-  // Services
-  final _storage = const FlutterSecureStorage();
-  final _dio = Dio();
 
   @override
   void initState() {
     super.initState();
-    _loadCustomMarkers().then((_) {
-      _initLocation();
-    });
+    _loadCustomMarkers().then((_) => _initLocation());
   }
 
   @override
@@ -76,7 +75,6 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   // --- SETUP AND INITIALIZATION ---
-
   Future<void> _loadCustomMarkers() async {
     _bikeMarkerIcon = await _getBitmapDescriptorFromAsset('assets/images/top-view-bike.png', 100);
     _autoMarkerIcon = await _getBitmapDescriptorFromAsset('assets/images/top-view-tuktuk.png', 100);
@@ -84,10 +82,10 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Future<BitmapDescriptor> _getBitmapDescriptorFromAsset(String path, int width) async {
-    final ByteData data = await rootBundle.load(path);
-    final ui.Codec codec = await ui.instantiateImageCodec(data.buffer.asUint8List(), targetWidth: width);
-    final ui.FrameInfo fi = await codec.getNextFrame();
-    final Uint8List resizedData = (await fi.image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
+    final data = await rootBundle.load(path);
+    final codec = await ui.instantiateImageCodec(data.buffer.asUint8List(), targetWidth: width);
+    final fi = await codec.getNextFrame();
+    final resizedData = (await fi.image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List();
     return BitmapDescriptor.fromBytes(resizedData);
   }
 
@@ -106,44 +104,33 @@ class _DashboardScreenState extends State<DashboardScreen> {
       }
 
       final locationData = await _locationService.getLocation();
-      final LatLng currentLatLng = LatLng(locationData.latitude!, locationData.longitude!);
-
-      // **FIX 2**: Set the initial pickup marker instead of a generic user marker
-      _setPickupMarker(currentLatLng);
-
+      final latLng = LatLng(locationData.latitude!, locationData.longitude!);
+      final address = await _reverseGeocode(latLng);
+      
+      _setPickupMarker(latLng, address: address ?? "Current Location");
+      
       final controller = await _mapController.future;
-      controller.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(target: currentLatLng, zoom: 15.0)));
-
+      controller.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(target: latLng, zoom: 15.0)));
+      
       _fetchNearbyDrivers();
-      _pollingTimer = Timer.periodic(const Duration(seconds: 9), (timer) {
-        _fetchNearbyDrivers();
-      });
+      _pollingTimer = Timer.periodic(const Duration(seconds: 9), (_) => _fetchNearbyDrivers());
     } catch (e) {
       debugPrint('Could not get location: $e');
     }
   }
 
   // --- API AND DATA HANDLING ---
-
   Future<void> _fetchNearbyDrivers() async {
     if (_pickupMarker == null) return;
-
     final apiUrl = dotenv.env['API_URL'];
     final token = await _storage.read(key: 'auth_token');
     if (token == null) return;
-
     try {
-      final response = await _dio.get(
-        '$apiUrl/ride-service/customer/nearby-drivers',
-        queryParameters: {'latitude': _pickupMarker!.position.latitude, 'longitude': _pickupMarker!.position.longitude},
-        options: Options(headers: {'Authorization': 'Bearer $token'}),
-      );
-
+      final response = await _dio.get('$apiUrl/ride-service/customer/nearby-drivers',
+          queryParameters: {'latitude': _pickupMarker!.position.latitude, 'longitude': _pickupMarker!.position.longitude},
+          options: Options(headers: {'Authorization': 'Bearer $token'}));
       if (response.statusCode == 200 && mounted) {
         _updateVehicleMarkers(response.data);
-        if (_isFirstDriverFetch) {
-          _isFirstDriverFetch = false;
-        }
       }
     } on DioException catch (e) {
       debugPrint('Could not fetch nearby drivers: $e');
@@ -161,14 +148,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
         final lng = vehicle['longitude'];
         if (driverId != null && lat != null && lng != null) {
           receivedDriverIds.add(driverId);
-          _vehicleMarkers[driverId] = Marker(
-            markerId: MarkerId(driverId),
-            position: LatLng(lat, lng),
-            icon: icon,
-            anchor: const Offset(0.5, 0.5),
-            rotation: vehicle['bearing']?.toDouble() ?? 0.0,
-            flat: true,
-          );
+          _vehicleMarkers[driverId] = Marker(markerId: MarkerId(driverId), position: LatLng(lat, lng), icon: icon, anchor: const Offset(0.5, 0.5), rotation: vehicle['bearing']?.toDouble() ?? 0.0, flat: true);
         }
       }
     }
@@ -182,133 +162,185 @@ class _DashboardScreenState extends State<DashboardScreen> {
     _vehicleMarkers.removeWhere((driverId, _) => !receivedDriverIds.contains(driverId));
     if (mounted) setState(() {});
   }
-
-  // --- PIN MARKER LOCATION SELECTION LOGIC ---
-
-  void _onCameraMove(CameraPosition position) {
-    if (_isSelectingLocation) {
-      setState(() {
-        _selectedLocationOnMap = position.target;
-        _isMapMoving = true;
-      });
+  
+  Future<String?> _reverseGeocode(LatLng latLng) async {
+    final apiUrl = dotenv.env['API_URL'];
+    final token = await _storage.read(key: 'auth_token');
+    if (apiUrl == null || token == null) return null;
+    final url = '$apiUrl/maps-service/maps/geocode/reverse';
+    try {
+      final response = await _dio.get(url, queryParameters: {'lat': latLng.latitude, 'lng': latLng.longitude}, options: Options(headers: {'Authorization': 'Bearer $token'}));
+      if (response.data['status'] == 'OK' && response.data['results'].isNotEmpty) {
+        return response.data['results'][0]['formatted_address'];
+      }
+    } catch (e) {
+      debugPrint("Reverse Geocoding Error: $e");
     }
+    return null;
+  }
+  
+  Future<LatLng?> _forwardGeocode(String address) async {
+    final apiUrl = dotenv.env['API_URL'];
+    final token = await _storage.read(key: 'auth_token');
+    if (apiUrl == null || token == null) return null;
+    final url = '$apiUrl/maps-service/maps/geocode/forward';
+    try {
+      final response = await _dio.get(url, queryParameters: {'address': address}, options: Options(headers: {'Authorization': 'Bearer $token'}));
+      if (response.data['status'] == 'OK' && response.data['results'].isNotEmpty) {
+        final location = response.data['results'][0]['geometry']['location'];
+        return LatLng(location['lat'], location['lng']);
+      }
+    } catch (e) {
+      debugPrint("Forward Geocoding Error: $e");
+    }
+    return null;
   }
 
-  Future<void> _onCameraIdle() async {
-    if (_isSelectingLocation) {
-      final apiKey = dotenv.env['GOOGLE_MAPS_API_KEY'];
-      final url = 'https://maps.googleapis.com/maps/api/geocode/json?latlng=${_selectedLocationOnMap.latitude},${_selectedLocationOnMap.longitude}&key=$apiKey';
-      try {
-        final response = await _dio.get(url);
-        if (response.data['status'] == 'OK' && mounted) {
-          final results = response.data['results'];
-          setState(() {
-            _selectedAddressOnMap = results.isNotEmpty ? results[0]['formatted_address'] : 'Unnamed Road';
-            _isMapMoving = false;
-          });
-        }
-      } catch (e) {
-        debugPrint("Geocoding Error: $e");
+  Future<void> _getFareEstimates() async {
+    if (_pickupMarker == null || _destinationMarker == null) return;
+    setState(() {
+      _isFetchingFares = true;
+      _fareErrorMessage = null;
+      _fareOptions = [];
+      _selectedFareOption = null;
+    });
+
+    final apiUrl = dotenv.env['API_URL'];
+    final token = await _storage.read(key: 'auth_token');
+    if (token == null) {
+      setState(() { _isFetchingFares = false; _fareErrorMessage = "Please log in to see fares."; });
+      return;
+    }
+
+    try {
+      final response = await _dio.post(
+        '$apiUrl/pricing-service/fares/estimate',
+        data: {
+          "pickup": {"latitude": _pickupMarker!.position.latitude, "longitude": _pickupMarker!.position.longitude},
+          "dropoff": {"latitude": _destinationMarker!.position.latitude, "longitude": _destinationMarker!.position.longitude}
+        },
+        options: Options(headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}),
+      );
+      if (response.statusCode == 200 && mounted) {
+        final List<dynamic> options = response.data['options'];
         setState(() {
-           _selectedAddressOnMap = "Could not fetch address";
-          _isMapMoving = false;
+          _fareOptions = options.map((data) => FareOption.fromJson(data)).toList();
+          _isFetchingFares = false;
+        });
+      }
+    } on DioException catch (e) {
+      if (mounted) {
+        setState(() {
+          _isFetchingFares = false;
+          _fareErrorMessage = e.response?.data['message'] ?? "An unexpected error occurred.";
         });
       }
     }
   }
+  
+  // --- UI MODE TRANSITIONS & ACTIONS ---
+  void _enterSearchMode(LocationField field) { setState(() { _isSearchingLocation = true; _activeField = field; }); }
+  void _exitSearchMode() { setState(() => _isSearchingLocation = false); }
 
-  void _enterLocationSelectionMode(LocationField field) {
-    setState(() {
-      _isSelectingLocation = true;
-      _activeLocationField = field;
-    });
-  }
-
-  void _confirmSelectedLocation() {
-    if (_activeLocationField == LocationField.pickup) {
-       _setPickupMarker(_selectedLocationOnMap, address: _selectedAddressOnMap);
-       _fetchNearbyDrivers(); // Re-fetch drivers for new location
+  void _handleLocationSelectedFromSearch(String address) async {
+    final coordinates = await _forwardGeocode(address);
+    if (coordinates == null) {
+      if(mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text("Could not find location for '$address'"), backgroundColor: Colors.red,));
+      }
+      _exitSearchMode();
+      return;
+    }
+    if (_activeField == LocationField.pickup) {
+      _setPickupMarker(coordinates, address: address);
     } else {
-       _setDestinationMarker(_selectedLocationOnMap, address: _selectedAddressOnMap);
+      _setDestinationMarker(coordinates, address: address);
     }
-    
-    setState(() {
-      _isSelectingLocation = false;
-      _activeLocationField = null;
-    });
+    _exitSearchMode();
+  }
 
-    // **FIX 3**: Auto-zoom if both markers are now set
-    if (_pickupMarker != null && _destinationMarker != null) {
+  void _handleUseCurrentLocation() async {
+    try {
+      final locationData = await _locationService.getLocation();
+      final latLng = LatLng(locationData.latitude!, locationData.longitude!);
+      final address = await _reverseGeocode(latLng);
+      if (address != null) {
+        _handleLocationSelectedFromSearch(address);
+      }
+    } catch (e) { 
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text("Could not get current location. Please enable location services."), backgroundColor: Colors.red,));
+      }
+    }
+  }
+
+  void _handleSelectOnMap() { setState(() { _isSearchingLocation = false; _isSelectingLocationOnMap = true; }); }
+  
+  void _confirmSelectedLocationOnMap() {
+    if (_activeField == LocationField.pickup) {
+      _setPickupMarker(_selectedLocationOnMap, address: _selectedAddressOnMap);
+    } else {
+      _setDestinationMarker(_selectedLocationOnMap, address: _selectedAddressOnMap);
+    }
+    setState(() => _isSelectingLocationOnMap = false);
+  }
+
+  // --- MAP & MARKER LOGIC ---
+  void _setPickupMarker(LatLng pos, {String? address}) {
+    setState(() {
+      _pickupMarker = Marker(markerId: const MarkerId('pickupLocation'), position: pos, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen));
+      if (address != null) _pickupLocationLabel = address;
+    });
+    if (_destinationMarker != null) _getFareEstimates();
+  }
+  void _setDestinationMarker(LatLng pos, {String? address}) {
+    setState(() {
+      _destinationMarker = Marker(markerId: const MarkerId('destinationLocation'), position: pos, icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed));
+      if (address != null) _destinationLabel = address;
+    });
+    if (_pickupMarker != null) {
       _zoomToFitRoute();
+      _getFareEstimates();
     }
   }
-
-  // --- MAP AND MARKER LOGIC ---
   
-  void _setPickupMarker(LatLng position, {String? address}) {
-    setState(() {
-      _pickupMarker = Marker(
-        markerId: const MarkerId('pickupLocation'),
-        position: position,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen), // Green for pickup
-        infoWindow: const InfoWindow(title: 'Pickup Location'),
-      );
-      if (address != null) {
-        _pickupLocationLabel = address;
-      }
-    });
-  }
-
-  void _setDestinationMarker(LatLng position, {String? address}) {
-    setState(() {
-      _destinationMarker = Marker(
-        markerId: const MarkerId('destinationLocation'),
-        position: position,
-        icon: BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed), // Red for destination
-        infoWindow: const InfoWindow(title: 'Destination'),
-      );
-      if (address != null) {
-        _destinationLabel = address;
-      }
-    });
-  }
-  
-  // **FIX 4**: New helper to combine all visible markers
   Set<Marker> _getAllMarkers() {
     final Set<Marker> markers = {};
-    if (_pickupMarker != null && !_isSelectingLocation) markers.add(_pickupMarker!);
-    if (_destinationMarker != null && !_isSelectingLocation) markers.add(_destinationMarker!);
+    if (_pickupMarker != null && !_isSearchingLocation && !_isSelectingLocationOnMap) markers.add(_pickupMarker!);
+    if (_destinationMarker != null && !_isSearchingLocation && !_isSelectingLocationOnMap) markers.add(_destinationMarker!);
     markers.addAll(_vehicleMarkers.values);
     return markers;
   }
 
   Future<void> _zoomToFitRoute() async {
     if (_pickupMarker == null || _destinationMarker == null) return;
-
-    final LatLng southwest = LatLng(
-      _pickupMarker!.position.latitude < _destinationMarker!.position.latitude
-          ? _pickupMarker!.position.latitude
-          : _destinationMarker!.position.latitude,
-      _pickupMarker!.position.longitude < _destinationMarker!.position.longitude
-          ? _pickupMarker!.position.longitude
-          : _destinationMarker!.position.longitude,
-    );
-    final LatLng northeast = LatLng(
-      _pickupMarker!.position.latitude > _destinationMarker!.position.latitude
-          ? _pickupMarker!.position.latitude
-          : _destinationMarker!.position.latitude,
-      _pickupMarker!.position.longitude > _destinationMarker!.position.longitude
-          ? _pickupMarker!.position.longitude
-          : _destinationMarker!.position.longitude,
-    );
-
+    final southwest = LatLng(
+        _pickupMarker!.position.latitude < _destinationMarker!.position.latitude ? _pickupMarker!.position.latitude : _destinationMarker!.position.latitude,
+        _pickupMarker!.position.longitude < _destinationMarker!.position.longitude ? _pickupMarker!.position.longitude : _destinationMarker!.position.longitude);
+    final northeast = LatLng(
+        _pickupMarker!.position.latitude > _destinationMarker!.position.latitude ? _pickupMarker!.position.latitude : _destinationMarker!.position.latitude,
+        _pickupMarker!.position.longitude > _destinationMarker!.position.longitude ? _pickupMarker!.position.longitude : _destinationMarker!.position.longitude);
     final bounds = LatLngBounds(southwest: southwest, northeast: northeast);
-    final GoogleMapController controller = await _mapController.future;
-    controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100.0)); // 100 is padding
+    final controller = await _mapController.future;
+    controller.animateCamera(CameraUpdate.newLatLngBounds(bounds, 100.0));
   }
   
+  void _onCameraMove(CameraPosition pos) {
+    if (_isSelectingLocationOnMap) {
+      setState(() { _selectedLocationOnMap = pos.target; _isMapMoving = true; });
+    }
+  }
+
+  Future<void> _onCameraIdle() async {
+    if (_isSelectingLocationOnMap) {
+      final address = await _reverseGeocode(_selectedLocationOnMap);
+      if (mounted) {
+        setState(() { _selectedAddressOnMap = address ?? "Could not fetch address"; _isMapMoving = false; });
+      }
+    }
+  }
+
   // --- WIDGETS ---
-  
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -324,149 +356,115 @@ class _DashboardScreenState extends State<DashboardScreen> {
         children: [
           GoogleMap(
             mapType: MapType.normal,
-            myLocationEnabled: false, // We use our own markers now
+            myLocationEnabled: false,
             myLocationButtonEnabled: false,
             initialCameraPosition: const CameraPosition(target: LatLng(18.5204, 73.8567), zoom: 12),
             markers: _getAllMarkers(),
-            onMapCreated: (GoogleMapController controller) => _mapController.complete(controller),
+            onMapCreated: (controller) => _mapController.complete(controller),
             onCameraMove: _onCameraMove,
             onCameraIdle: _onCameraIdle,
           ),
-
-          if (_isSelectingLocation) ...[
-            // Central Pin Marker
-            Center(
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 40.0),
-                child: Image.asset('assets/images/marker.png', height: 50),
-              ),
-            ),
-            // Location Confirmation Card
-            _buildLocationConfirmationCard(),
-          ],
-
-          // Main Booking Sheet
-          if (!_isSelectingLocation)
-            DraggableScrollableSheet(
-              initialChildSize: 0.45,
-              minChildSize: 0.45,
-              maxChildSize: 0.8,
-              builder: (BuildContext context, ScrollController scrollController) {
-                return Container(
-                  decoration: const BoxDecoration(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.only(topLeft: Radius.circular(24), topRight: Radius.circular(24)),
-                    boxShadow: [BoxShadow(blurRadius: 10.0, color: Colors.black12)],
-                  ),
-                  child: SingleChildScrollView(
-                    controller: scrollController,
-                    child: Padding(
-                      padding: const EdgeInsets.all(20.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          ServiceSelector(
-                            selectedService: _selectedService,
-                            onServiceSelected: (service) => setState(() {
-                              _selectedService = service;
-                              _selectedVehicle = null;
-                            }),
-                          ),
-                          const SizedBox(height: 20),
-                          LocationFields(
-                            pickupLabel: _pickupLocationLabel,
-                            destinationLabel: _destinationLabel,
-                            onPickupTap: () => _enterLocationSelectionMode(LocationField.pickup),
-                            onDestinationTap: () => _enterLocationSelectionMode(LocationField.destination),
-                          ),
-                          const SizedBox(height: 24),
-                          Text('Select a Ride', style: GoogleFonts.plusJakartaSans(fontSize: 18, fontWeight: FontWeight.bold)),
-                          const SizedBox(height: 16),
-                          VehicleSelector(
-                            selectedService: _selectedService,
-                            selectedVehicle: _selectedVehicle,
-                            onVehicleSelected: (vehicle) => setState(() => _selectedVehicle = vehicle),
-                          ),
-                          const SizedBox(height: 24),
-                          SizedBox(
-                            width: double.infinity,
-                            child: ElevatedButton(
-                              onPressed: _selectedVehicle == null ? null : () {},
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF27b4ad),
-                                padding: const EdgeInsets.symmetric(vertical: 18),
-                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                                disabledBackgroundColor: Colors.grey.shade300,
-                              ),
-                              child: Text('Confirm Booking', style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                );
-              },
-            ),
+          if (_isSelectingLocationOnMap) ..._buildMapSelectionUI(),
+          if (_isSearchingLocation) _buildSearchPanel(),
+          if (!_isSearchingLocation && !_isSelectingLocationOnMap) _buildBookingPanel(),
         ],
       ),
     );
   }
 
-  /// Widget for the location confirmation card.
-  Widget _buildLocationConfirmationCard() {
-    return Align(
-      alignment: Alignment.bottomCenter,
-      child: Container(
-        width: double.infinity,
-        margin: const EdgeInsets.all(20),
-        padding: const EdgeInsets.all(20),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, spreadRadius: 2)],
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              "SELECT LOCATION",
-              style: GoogleFonts.plusJakartaSans(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 8),
-            Row(
+  Widget _buildBookingPanel() {
+    return DraggableScrollableSheet(
+      initialChildSize: 0.45, minChildSize: 0.45, maxChildSize: 0.8,
+      builder: (context, scrollController) {
+        return Container(
+          decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.only(topLeft: Radius.circular(24), topRight: Radius.circular(24)), boxShadow: [BoxShadow(blurRadius: 10.0, color: Colors.black12)]),
+          child: SingleChildScrollView(
+            controller: scrollController,
+            padding: const EdgeInsets.all(20.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Icon(Icons.location_on, color: Color(0xFF27b4ad)),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _isMapMoving ? 'Loading...' : _selectedAddressOnMap,
-                    style: GoogleFonts.plusJakartaSans(fontSize: 16, fontWeight: FontWeight.w600),
+                ServiceSelector(selectedService: _selectedService, onServiceSelected: (s) => setState(() { _selectedService = s; _selectedFareOption = null; })),
+                const SizedBox(height: 20),
+                LocationFields(pickupLabel: _pickupLocationLabel, destinationLabel: _destinationLabel, onPickupTap: () => _enterSearchMode(LocationField.pickup), onDestinationTap: () => _enterSearchMode(LocationField.destination)),
+                const SizedBox(height: 24),
+                Text('Select a Ride', style: GoogleFonts.plusJakartaSans(fontSize: 18, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 16),
+                
+                VehicleSelector(
+                  fareOptions: _fareOptions,
+                  selectedOption: _selectedFareOption,
+                  isLoading: _isFetchingFares,
+                  errorMessage: _fareErrorMessage,
+                  onVehicleSelected: (option) {
+                    setState(() => _selectedFareOption = option);
+                    debugPrint("Selected Fare ID: ${option.fareId}");
+                  },
+                ),
+                
+                const SizedBox(height: 24),
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton(
+                    onPressed: _selectedFareOption == null ? null : () {
+                      // TODO: Implement final booking confirmation call using _selectedFareOption.fareId
+                    },
+                    style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF27b4ad), padding: const EdgeInsets.symmetric(vertical: 18), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)), disabledBackgroundColor: Colors.grey.shade300),
+                    child: Text('Confirm Booking', style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 20),
-            SizedBox(
-              width: double.infinity,
-              child: ElevatedButton(
-                onPressed: _isMapMoving ? null : _confirmSelectedLocation,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: const Color(0xFF27b4ad),
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                   disabledBackgroundColor: Colors.grey.shade300,
-                ),
-                child: Text(
-                  'Confirm Location',
-                  style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18),
-                ),
-              ),
-            ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
+
+  Widget _buildSearchPanel() {
+    return LocationSearchPanel(onCancel: _exitSearchMode, onLocationSelected: _handleLocationSelectedFromSearch, onSelectOnMap: _handleSelectOnMap, onUseCurrentLocation: _handleUseCurrentLocation);
+  }
+
+  List<Widget> _buildMapSelectionUI() {
+    return [
+      Center(
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 40.0),
+          child: Image.asset('assets/images/marker.png', height: 50),
+        ),
+      ),
+      Align(
+        alignment: Alignment.bottomCenter,
+        child: Container(
+          width: double.infinity,
+          margin: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(20),
+          decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(16), boxShadow: const [BoxShadow(color: Colors.black12, blurRadius: 10, spreadRadius: 2)]),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text("SELECT LOCATION", style: GoogleFonts.plusJakartaSans(fontSize: 12, color: Colors.grey, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              Row(children: [
+                const Icon(Icons.location_on, color: Color(0xFF27b4ad)),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_isMapMoving ? 'Loading...' : _selectedAddressOnMap, style: GoogleFonts.plusJakartaSans(fontSize: 16, fontWeight: FontWeight.w600)))
+              ]),
+              const SizedBox(height: 20),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: _isMapMoving ? null : _confirmSelectedLocationOnMap,
+                  style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF27b4ad), padding: const EdgeInsets.symmetric(vertical: 16), shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)), disabledBackgroundColor: Colors.grey.shade300),
+                  child: Text('Confirm Location', style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                ),
+              )
+            ],
+          ),
+        ),
+      )
+    ];
+  }
 }
+

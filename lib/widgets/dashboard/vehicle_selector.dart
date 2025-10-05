@@ -1,97 +1,142 @@
 import 'package:flutter/material.dart';
 import 'package:google_fonts/google_fonts.dart';
-import 'package:ridefast/screens/dashboard_screen.dart'; // For Enums
+import 'package:ridefast/models/fare_option.dart';
+import 'package:shimmer/shimmer.dart';
 
-/// A widget for selecting a vehicle type from a horizontal list.
 class VehicleSelector extends StatelessWidget {
-  final ServiceType selectedService;
-  final VehicleType? selectedVehicle;
-  final ValueChanged<VehicleType> onVehicleSelected;
+  final List<FareOption> fareOptions;
+  final FareOption? selectedOption;
+  final Function(FareOption) onVehicleSelected;
+  final bool isLoading;
+  final String? errorMessage;
 
   const VehicleSelector({
     super.key,
-    required this.selectedService,
-    required this.selectedVehicle,
+    required this.fareOptions,
+    this.selectedOption,
     required this.onVehicleSelected,
+    this.isLoading = false,
+    this.errorMessage,
   });
+
+  // Predefined order for sorting the vehicle list
+  static const _sortOrder = {
+    'bike': 0,
+    'auto': 1,
+    'car_economy': 2,
+    'car_premium': 3,
+    'car_xl': 4,
+  };
 
   @override
   Widget build(BuildContext context) {
-    if (selectedService == ServiceType.parcel) {
-      return _buildVehicleOption(
-        iconPath: 'assets/images/parcel_icon.png',
-        label: 'Parcel',
-        price: '₹50', // Example price
-        vehicleType: VehicleType.parcel,
+    if (isLoading) {
+      return _buildSkeletonLoader();
+    }
+
+    if (errorMessage != null) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 32.0),
+          child: Text(
+            errorMessage!,
+            textAlign: TextAlign.center,
+            style: const TextStyle(color: Colors.red, fontWeight: FontWeight.bold),
+          ),
+        ),
+      );
+    }
+    
+    if (fareOptions.isEmpty) {
+       return const Center(
+        child: Padding(
+          padding: EdgeInsets.symmetric(vertical: 32.0),
+          child: Text("Select a pickup and drop-off to see available rides."),
+        ),
       );
     }
 
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      child: Row(
-        children: [
-          _buildVehicleOption(
-              iconPath: 'assets/images/bike_icon.png',
-              label: 'Bike',
-              price: '₹75',
-              vehicleType: VehicleType.bike),
-          _buildVehicleOption(
-              iconPath: 'assets/images/auto_icon.png',
-              label: 'Auto',
-              price: '₹120',
-              vehicleType: VehicleType.auto),
-          _buildVehicleOption(
-              iconPath: 'assets/images/mini_icon.png',
-              label: 'Economy',
-              price: '₹150',
-              vehicleType: VehicleType.economy),
-          _buildVehicleOption(
-              iconPath: 'assets/images/sedan_icon.png',
-              label: 'Premium',
-              price: '₹180',
-              vehicleType: VehicleType.premium),
-          _buildVehicleOption(
-              iconPath: 'assets/images/suv_icon.png',
-              label: 'Extra XL',
-              price: '₹220',
-              vehicleType: VehicleType.xl),
-        ],
-      ),
+    // Sort the list before building it
+    final sortedOptions = List<FareOption>.from(fareOptions);
+    sortedOptions.sort((a, b) {
+      final aOrder = _sortOrder[a.sortKey] ?? 99;
+      final bOrder = _sortOrder[b.sortKey] ?? 99;
+      return aOrder.compareTo(bOrder);
+    });
+
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: sortedOptions.length,
+      itemBuilder: (context, index) {
+        final option = sortedOptions[index];
+        final bool isSelected = selectedOption?.fareId == option.fareId;
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          elevation: isSelected ? 4 : 1,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(
+              color: isSelected ? const Color(0xFF27b4ad) : Colors.grey.shade300,
+              width: isSelected ? 2 : 1,
+            ),
+          ),
+          child: InkWell(
+            onTap: () => onVehicleSelected(option),
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: isSelected ? const Color(0xFFE0F2F1) : Colors.white,
+              ),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                leading: Image.asset(option.imagePath, width: 60, height: 60),
+                title: Text(
+                  option.displayName,
+                  style: GoogleFonts.plusJakartaSans(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                  ),
+                ),
+                subtitle: Text(
+                  'Hassle-free rides',
+                  style: GoogleFonts.plusJakartaSans(color: Colors.black54),
+                ),
+                trailing: Text(
+                  '₹${option.amount.toStringAsFixed(0)}',
+                  style: GoogleFonts.plusJakartaSans(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 18,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 
-  Widget _buildVehicleOption({
-    required String iconPath,
-    required String label,
-    required String price,
-    required VehicleType vehicleType,
-  }) {
-    final bool isSelected = selectedVehicle == vehicleType;
-    return GestureDetector(
-      onTap: () => onVehicleSelected(vehicleType),
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 200),
-        width: 100,
-        margin: const EdgeInsets.only(right: 12),
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFE0F2F1) : Colors.grey[100],
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isSelected ? const Color(0xFF27b4ad) : Colors.transparent,
-            width: 2,
+  Widget _buildSkeletonLoader() {
+    return Shimmer.fromColors(
+      baseColor: Colors.grey[300]!,
+      highlightColor: Colors.grey[100]!,
+      child: Column(
+        children: List.generate(3, (index) => Card(
+          margin: const EdgeInsets.only(bottom: 10),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          child: ListTile(
+            contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            leading: Container(width: 60, height: 60, color: Colors.white),
+            title: Container(width: 120, height: 16, color: Colors.white),
+            subtitle: Container(width: 100, height: 12, margin: const EdgeInsets.only(top: 4), color: Colors.white),
+            trailing: Container(width: 50, height: 20, color: Colors.white),
           ),
-        ),
-        child: Column(
-          children: [
-            Image.asset(iconPath, width: 48, height: 48),
-            const SizedBox(height: 8),
-            Text(label, style: GoogleFonts.plusJakartaSans(fontWeight: FontWeight.bold)),
-            const SizedBox(height: 4),
-            Text(price, style: GoogleFonts.plusJakartaSans(color: Colors.black54, fontSize: 12)),
-          ],
-        ),
+        )),
       ),
     );
   }
 }
+

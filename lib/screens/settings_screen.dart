@@ -18,6 +18,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   String? _homeAddress;
   String? _workAddress;
   final _storage = const FlutterSecureStorage();
+  final _dio = Dio();
 
   @override
   void initState() {
@@ -33,19 +34,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
     });
   }
 
+  // **FIX**: Re-enabled this function to use the new forward geocoding endpoint.
   Future<LatLng?> _getCoordinatesFromAddress(String address) async {
-    final dio = Dio();
-    final apiKey = dotenv.env['GOOGLE_MAPS_API_KEY'];
-    final url = 'https://maps.googleapis.com/maps/api/geocode/json?address=$address&key=$apiKey';
+    final apiUrl = dotenv.env['API_URL'];
+    final token = await _storage.read(key: 'auth_token');
+    if (apiUrl == null || token == null) return null;
+
+    final url = '$apiUrl/maps-service/maps/geocode/forward';
 
     try {
-      final response = await dio.get(url);
+      final response = await _dio.get(
+        url,
+        queryParameters: {'address': address},
+        options: Options(headers: {'Authorization': 'Bearer $token'}),
+      );
+
       if (response.data['status'] == 'OK') {
         final location = response.data['results'][0]['geometry']['location'];
         return LatLng(location['lat'], location['lng']);
       }
     } catch (e) {
-      print('Error geocoding address: $e');
+      debugPrint('Error geocoding address: $e');
     }
     return null;
   }
@@ -68,12 +77,11 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
 
       // 3. Call the API to save the location
-      final dio = Dio();
       final apiUrl = dotenv.env['API_URL'];
       final token = await _storage.read(key: 'auth_token');
 
       try {
-        final response = await dio.put(
+        final response = await _dio.put(
           '$apiUrl/user-service/locations/save',
           data: {
             'type': type.toLowerCase(),
