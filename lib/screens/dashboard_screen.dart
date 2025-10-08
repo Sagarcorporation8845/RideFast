@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
@@ -12,6 +13,7 @@ import 'package:location/location.dart';
 import 'package:ridefast/models/fare_option.dart';
 import 'package:ridefast/services/local_notification_service.dart';
 import 'package:ridefast/services/ride_state_service.dart';
+import 'package:ridefast/services/sound_service.dart';
 import 'package:ridefast/widgets/dashboard/location_fields.dart';
 import 'package:ridefast/widgets/dashboard/location_search_panel.dart';
 import 'package:ridefast/widgets/dashboard/payment_selector.dart';
@@ -46,6 +48,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final Map<String, Marker> _vehicleMarkers = {};
   Marker? _pickupMarker;
   Marker? _destinationMarker;
+  static const CameraPosition _defaultInitialPosition = CameraPosition(target: LatLng(18.4636, 73.8665), zoom: 12);
+  LatLng? _currentUserLocation;
+
+  // Polyline State
+  final Set<Polyline> _polylines = {};
+  String? _encodedPolyline;
 
   // Mode States
   bool _isSearchingLocation = false;
@@ -75,6 +83,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final Dio _dio = Dio();
   final RideStateService _rideStateService = RideStateService();
   final LocalNotificationService _notificationService = LocalNotificationService();
+  final SoundService _soundService = SoundService();
   WebSocketChannel? _channel;
 
   // Icons
@@ -92,6 +101,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   void dispose() {
     _pollingTimer?.cancel();
     _channel?.sink.close();
+    _soundService.dispose();
     super.dispose();
   }
 
@@ -121,10 +131,13 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
       final locationData = await _locationService.getLocation();
       final latLng = LatLng(locationData.latitude!, locationData.longitude!);
+      _currentUserLocation = latLng;
       final address = await _reverseGeocode(latLng);
-      _setPickupMarker(latLng, address: address ?? "Current Location");
+
       final controller = await _mapController.future;
       controller.animateCamera(CameraUpdate.newCameraPosition(CameraPosition(target: latLng, zoom: 15.0)));
+      
+      _setPickupMarker(latLng, address: address ?? "Current Location");
       _fetchNearbyDrivers();
       _pollingTimer = Timer.periodic(const Duration(seconds: 9), (_) => _fetchNearbyDrivers());
     } catch (e) {
@@ -168,7 +181,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
               position: LatLng(lat, lng),
               icon: icon,
               anchor: const Offset(0.5, 0.5),
-              rotation: vehicle['bearing']?.toDouble() ?? 0.0,
+              // **BEARING UPDATE HERE**
+              rotation: (vehicle['bearing'] as num? ?? 0.0).toDouble(),
               flat: true);
         }
       }
@@ -227,6 +241,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
       _fareErrorMessage = null;
       _fareOptions = [];
       _selectedFareOption = null;
+      _polylines.clear();
+      _encodedPolyline = null;
     });
 
     final apiUrl = dotenv.env['API_URL'];
@@ -257,6 +273,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
             _isWalletAvailable = paymentOptions['wallet']['is_available'] ?? false;
             _walletBalance = (paymentOptions['wallet']['balance'] as num?)?.toDouble() ?? 0.0;
           }
+          _encodedPolyline = response.data['polyline'];
+          _drawPolyline(_encodedPolyline, 'ride_route');
           _isFetchingFares = false;
         });
       }
@@ -270,8 +288,30 @@ class _DashboardScreenState extends State<DashboardScreen> {
     }
   }
 
+  void _drawPolyline(String? encodedPolyline, String polylineId) {
+    if (encodedPolyline == null || encodedPolyline.isEmpty) return;
+
+    final polylinePoints = PolylinePoints();
+    List<PointLatLng> decodedResult = polylinePoints.decodePolyline(encodedPolyline);
+    List<LatLng> points = decodedResult.map((point) => LatLng(point.latitude, point.longitude)).toList();
+
+    if (points.isNotEmpty) {
+      final polyline = Polyline(
+        polylineId: PolylineId(polylineId),
+        color: const Color(0xFF27b4ad).withOpacity(0.8),
+        points: points,
+        width: 5,
+        startCap: Cap.roundCap,
+        endCap: Cap.roundCap,
+      );
+      setState(() {
+        _polylines.add(polyline);
+      });
+    }
+  }
+
   Future<void> _requestRide() async {
-    if (_selectedFareOption == null) return;
+    if (_selectedFareOption == null || _encodedPolyline == null) return;
     setState(() => _isRequestingRide = true);
 
     final apiUrl = dotenv.env['API_URL'];
@@ -290,6 +330,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
           "fareId": _selectedFareOption!.fareId,
           "payment_method": paymentMethodMap[_selectedPaymentMethod],
           "use_wallet": _selectedPaymentMethod == PaymentMethod.wallet,
+          "polyline": _encodedPolyline,
         },
         options: Options(headers: {'Authorization': 'Bearer $token', 'Content-Type': 'application/json'}),
       );
@@ -322,11 +363,12 @@ class _DashboardScreenState extends State<DashboardScreen> {
 
     try {
       _channel = WebSocketChannel.connect(Uri.parse(websocketUrl), protocols: ["customer-protocol", token]);
-      _channel!.stream.listen((message) {
+      _channel!.stream.listen((message) async {
         if (!mounted) return;
         final decoded = jsonDecode(message);
         if (decoded['type'] == 'DRIVER_ASSIGNED') {
           _channel?.sink.close();
+          _soundService.playDriverAssignedSound();
           final payload = Map<String, dynamic>.from(decoded['payload']);
           final driverName = payload['driver']?['name'] ?? 'Your driver';
 
@@ -335,6 +377,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
             title: 'Driver Assigned!',
             body: '$driverName is on the way to pick you up.',
           );
+          
+          final controller = await _mapController.future;
+          final zoom = await controller.getZoomLevel();
 
           final rideDataForPersistence = {
             ...payload,
@@ -345,11 +390,23 @@ class _DashboardScreenState extends State<DashboardScreen> {
             'dropoff_lat': _destinationMarker?.position.latitude,
             'dropoff_lng': _destinationMarker?.position.longitude,
             'initial_state': RideState.driverAssigned.toString(),
+            'initial_camera_position': _currentUserLocation != null ?
+              {
+                'latitude': _currentUserLocation!.latitude,
+                'longitude': _currentUserLocation!.longitude,
+                'zoom': zoom,
+              } : null,
+            'rideRoutePolyline': _encodedPolyline,
+            // **PASSING VEHICLE CATEGORY**
+            'vehicle_category': _selectedFareOption?.vehicleCategory,
+            'sub_category': _selectedFareOption?.subCategory,
           };
+
           _rideStateService.saveRideState(RideState.driverAssigned, rideDataForPersistence).then((_) {
             Navigator.of(context).pushNamed('/ride-on-the-way', arguments: rideDataForPersistence);
             setState(() { _isSearchingForDriver = false; });
           });
+
         } else if (decoded['type'] == 'NO_DRIVERS_AVAILABLE') {
           _cancelDriverSearch(showError: true, message: 'All drivers are busy. Please try again.');
         }
@@ -362,6 +419,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   void _cancelDriverSearch({bool showError = false, String? message}) async {
+    if (showError) _soundService.playRideCancelledSound();
     await _rideStateService.clearRideState();
     _channel?.sink.close();
     if (mounted) {
@@ -473,8 +531,9 @@ class _DashboardScreenState extends State<DashboardScreen> {
               mapType: MapType.normal,
               myLocationEnabled: false,
               myLocationButtonEnabled: false,
-              initialCameraPosition: const CameraPosition(target: LatLng(18.5204, 73.8567), zoom: 12),
+              initialCameraPosition: _defaultInitialPosition,
               markers: _getAllMarkers(),
+              polylines: _polylines,
               onMapCreated: (controller) => _mapController.complete(controller),
               onCameraMove: _onCameraMove,
               onCameraIdle: _onCameraIdle),
@@ -487,46 +546,61 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildBookingPanel() {
+    final bool showRideSelection = _isFetchingFares || _fareOptions.isNotEmpty || _fareErrorMessage != null;
     String buttonText = 'Confirm Booking';
     if (_selectedFareOption != null) { buttonText = 'Book ${_selectedFareOption!.displayName}'; }
 
     return DraggableScrollableSheet(
       key: const ValueKey('bookingPanel'),
-      initialChildSize: 0.5,
-      minChildSize: 0.4,
+      initialChildSize: showRideSelection ? 0.6 : 0.4,
+      minChildSize: showRideSelection ? 0.4 : 0.4,
       maxChildSize: 0.85,
       builder: (context, scrollController) {
         return Container(
           decoration: const BoxDecoration(color: Colors.white, borderRadius: BorderRadius.only(topLeft: Radius.circular(24), topRight: Radius.circular(24)), boxShadow: [BoxShadow(blurRadius: 10.0, color: Colors.black12)]),
           child: ListView(
+            physics: showRideSelection ? const AlwaysScrollableScrollPhysics() : const NeverScrollableScrollPhysics(),
             controller: scrollController,
             padding: const EdgeInsets.fromLTRB(20, 20, 20, 30),
             children: [
               ServiceSelector(selectedService: _selectedService, onServiceSelected: (s) => setState(() { _selectedService = s; _selectedFareOption = null; })),
               const SizedBox(height: 20),
               LocationFields(pickupLabel: _pickupLocationLabel, destinationLabel: _destinationLabel, onPickupTap: () => _enterSearchMode(LocationField.pickup), onDestinationTap: () => _enterSearchMode(LocationField.destination)),
-              const SizedBox(height: 24),
-              Text('Select a Ride', style: GoogleFonts.plusJakartaSans(fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 16),
-              VehicleSelector(fareOptions: _fareOptions, selectedOption: _selectedFareOption, isLoading: _isFetchingFares, errorMessage: _fareErrorMessage, onVehicleSelected: (option) { setState(() => _selectedFareOption = option); }),
-              if (_fareOptions.isNotEmpty) ...[
-                const SizedBox(height: 24),
-                PaymentSelector(selectedPaymentMethod: _selectedPaymentMethod, walletBalance: _walletBalance, isWalletAvailable: _isWalletAvailable, onPaymentMethodSelected: (method) { setState(() { _selectedPaymentMethod = method; }); })
-              ],
-              const SizedBox(height: 24),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: (_selectedFareOption == null || _isRequestingRide) ? null : _requestRide,
-                  style: ElevatedButton.styleFrom(
-                      backgroundColor: const Color(0xFF27b4ad),
-                      padding: const EdgeInsets.symmetric(vertical: 18),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
-                      disabledBackgroundColor: Colors.grey.shade300),
-                  child: _isRequestingRide
-                      ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
-                      : Text(buttonText, style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
-                ),
+              
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 400),
+                child: !showRideSelection 
+                  ? const SizedBox.shrink()
+                  : Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const SizedBox(height: 24),
+                        Text('Select a Ride', style: GoogleFonts.plusJakartaSans(fontSize: 18, fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 16),
+                        VehicleSelector(fareOptions: _fareOptions, selectedOption: _selectedFareOption, isLoading: _isFetchingFares, errorMessage: _fareErrorMessage, onVehicleSelected: (option) { setState(() => _selectedFareOption = option); }),
+                        
+                        if (_fareOptions.isNotEmpty) ...[
+                          const SizedBox(height: 24),
+                          PaymentSelector(selectedPaymentMethod: _selectedPaymentMethod, walletBalance: _walletBalance, isWalletAvailable: _isWalletAvailable, onPaymentMethodSelected: (method) { setState(() { _selectedPaymentMethod = method; }); })
+                        ],
+                        
+                        const SizedBox(height: 24),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton(
+                            onPressed: (_selectedFareOption == null || _isRequestingRide) ? null : _requestRide,
+                            style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF27b4ad),
+                                padding: const EdgeInsets.symmetric(vertical: 18),
+                                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(30)),
+                                disabledBackgroundColor: Colors.grey.shade300),
+                            child: _isRequestingRide
+                                ? const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3))
+                                : Text(buttonText, style: GoogleFonts.plusJakartaSans(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 18)),
+                          ),
+                        ),
+                      ],
+                    ),
               ),
             ],
           ),

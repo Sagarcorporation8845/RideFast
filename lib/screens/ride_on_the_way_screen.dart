@@ -1,13 +1,21 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data'; // <-- MISSING IMPORT
+import 'dart:ui' as ui; // <-- MISSING IMPORT
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // <-- MISSING IMPORT
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_polyline_points/flutter_polyline_points.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:ridefast/services/local_notification_service.dart';
 import 'package:ridefast/services/ride_state_service.dart';
+import 'package:ridefast/services/sound_service.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:latlong2/latlong.dart' as latlong;
+
 
 class RideOnTheWayScreen extends StatefulWidget {
   const RideOnTheWayScreen({super.key});
@@ -23,11 +31,21 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   BitmapDescriptor? _driverIcon;
   BitmapDescriptor? _pickupIcon;
   BitmapDescriptor? _dropoffIcon;
+  CameraPosition? _initialCameraPosition;
+  final Set<Polyline> _polylines = {};
+
+  // Advanced polyline and icon logic
+  List<LatLng> _pickupRoutePolylinePoints = [];
+  List<LatLng> _rideRoutePolylinePoints = [];
+  List<LatLng> _currentPolylinePoints = [];
+
 
   // Ride and Driver Data State
   Map<String, dynamic> _rideData = {};
   String _rideStatusText = "Captain is on the way!";
   bool _isDriverArrived = false;
+  bool _isRideStarted = false;
+  String? _endRideOtp;
 
   // WebSocket, Timer, and Notification State
   WebSocketChannel? _channel;
@@ -36,6 +54,9 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   final _storage = const FlutterSecureStorage();
   final _rideStateService = RideStateService();
   final LocalNotificationService _notificationService = LocalNotificationService();
+  final SoundService _soundService = SoundService();
+  bool _isConnecting = false;
+  int _reconnectAttempts = 0;
 
   @override
   void didChangeDependencies() {
@@ -43,13 +64,20 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
     if (_rideData.isEmpty) {
       final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>? ?? {};
       setState(() { _rideData = args; });
+      if (args['initial_camera_position'] != null) {
+        _initialCameraPosition = CameraPosition(
+          target: LatLng(args['initial_camera_position']['latitude'], args['initial_camera_position']['longitude']),
+          zoom: args['initial_camera_position']['zoom'],
+        );
+      } else {
+        _initialCameraPosition = const CameraPosition(target: LatLng(18.4636, 73.8665), zoom: 12);
+      }
       _initializeScreen();
     }
   }
 
   Future<void> _initializeScreen() async {
-    // Load custom marker icons
-    _driverIcon = await BitmapDescriptor.fromAssetImage(const ImageConfiguration(size: Size(48, 48)), 'assets/images/top-view-car.png');
+    await _loadVehicleIcon();
     _pickupIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueGreen);
     _dropoffIcon = BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueRed);
 
@@ -60,52 +88,200 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
 
     _addMarker(id: 'pickup', position: pickupLatLng, icon: _pickupIcon!);
     _addMarker(id: 'dropoff', position: dropoffLatLng, icon: _dropoffIcon!);
+    
+    _pickupRoutePolylinePoints = _decodePolyline(_rideData['pickupRoutePolyline']);
+    _rideRoutePolylinePoints = _decodePolyline(_rideData['rideRoutePolyline']);
 
-    final controller = await _mapController.future;
-    controller.animateCamera(CameraUpdate.newLatLngBounds(
-      LatLngBounds(
-        southwest: LatLng(pickupLatLng.latitude < dropoffLatLng.latitude ? pickupLatLng.latitude : dropoffLatLng.latitude, pickupLatLng.longitude < dropoffLatLng.longitude ? pickupLatLng.longitude : dropoffLatLng.longitude),
-        northeast: LatLng(pickupLatLng.latitude > dropoffLatLng.latitude ? pickupLatLng.latitude : dropoffLatLng.latitude, pickupLatLng.longitude > dropoffLatLng.longitude ? pickupLatLng.longitude : dropoffLatLng.longitude),
-      ), 100.0,
-    ));
+    // Initially, show the pickup route
+    _currentPolylinePoints = List.from(_pickupRoutePolylinePoints);
+    _drawPolyline(_currentPolylinePoints, 'active_route', Colors.amber.shade700);
 
-    if (_rideData['initial_state'] == RideState.driverArrived.toString()) {
+
+    final initialState = RideState.values.firstWhere((e) => e.toString() == _rideData['initial_state'], orElse: () => RideState.driverAssigned);
+    if (initialState == RideState.driverArrived) {
       _handleDriverArrived(fromInit: true);
+    } else if (initialState == RideState.rideStarted) {
+      _handleRideStarted(fromInit: true);
     }
+  }
+
+  Future<void> _loadVehicleIcon() async {
+    String vehicleCategory = _rideData['vehicle_category'] ?? 'car';
+    String iconPath;
+    switch (vehicleCategory) {
+      case 'bike':
+        iconPath = 'assets/images/top-view-bike.png';
+        break;
+      case 'auto':
+        iconPath = 'assets/images/top-view-tuktuk.png';
+        break;
+      default:
+        iconPath = 'assets/images/top-view-car.png';
+    }
+     final ByteData data = await rootBundle.load(iconPath);
+    final ui.Codec codec = await ui.instantiateImageCodec(data.buffer.asUint8List(), targetWidth: 100);
+    final ui.FrameInfo fi = await codec.getNextFrame();
+    _driverIcon = BitmapDescriptor.fromBytes((await fi.image.toByteData(format: ui.ImageByteFormat.png))!.buffer.asUint8List());
+  }
+
+  List<LatLng> _decodePolyline(String? encodedPolyline) {
+    if (encodedPolyline == null || encodedPolyline.isEmpty) return [];
+    final polylinePoints = PolylinePoints();
+    List<PointLatLng> decodedResult = polylinePoints.decodePolyline(encodedPolyline);
+    return decodedResult.map((point) => LatLng(point.latitude, point.longitude)).toList();
+  }
+
+  void _drawPolyline(List<LatLng> points, String polylineId, Color color) {
+    if (points.isEmpty) return;
+
+    final polyline = Polyline(
+      polylineId: PolylineId(polylineId),
+      color: color.withOpacity(0.8),
+      points: points,
+      width: 5,
+      startCap: Cap.roundCap,
+      endCap: Cap.roundCap,
+    );
+    setState(() {
+      _polylines.add(polyline);
+    });
   }
 
   Future<void> _connectToWebSocket() async {
+    if (_isConnecting) return;
+    setState(() => _isConnecting = true);
+
     final token = await _storage.read(key: 'auth_token');
     final websocketUrl = dotenv.env['WEBSOCKET_URL'];
-    if (token == null || websocketUrl == null) return;
+    if (token == null || websocketUrl == null) {
+      setState(() => _isConnecting = false);
+      return;
+    }
 
     try {
       _channel = WebSocketChannel.connect(Uri.parse(websocketUrl), protocols: ["customer-protocol", token]);
-      _channel!.stream.listen((message) {
-        final decoded = jsonDecode(message);
-        switch (decoded['type']) {
-          case 'DRIVER_LOCATION_UPDATE':
-            final payload = decoded['payload'];
-            _updateDriverMarker(LatLng(payload['latitude'], payload['longitude']));
-            break;
-          case 'DRIVER_ARRIVED':
-            _handleDriverArrived();
-            break;
-        }
-      });
+      setState(() { _isConnecting = false; _reconnectAttempts = 0; });
+      _channel!.stream.listen(_onWebSocketMessage,
+        onDone: _handleWebSocketDisconnect,
+        onError: (error) {
+          debugPrint("WebSocket Error: $error");
+          _handleWebSocketDisconnect();
+        },
+        cancelOnError: true,
+      );
     } catch (e) {
       debugPrint("WebSocket Connection Error: $e");
+      _handleWebSocketDisconnect();
     }
   }
 
-  void _updateDriverMarker(LatLng position) {
-    final marker = Marker(markerId: const MarkerId('driver'), position: position, icon: _driverIcon!, anchor: const Offset(0.5, 0.5), flat: true);
-    setState(() { _markers[const MarkerId('driver')] = marker; });
+  void _onWebSocketMessage(message) {
+      final decoded = jsonDecode(message);
+      switch (decoded['type']) {
+        case 'DRIVER_LOCATION_UPDATE':
+          final payload = decoded['payload'];
+          _updateDriverMarker(
+            LatLng(payload['latitude'], payload['longitude']),
+            (payload['bearing'] as num? ?? 0.0).toDouble()
+          );
+          break;
+        case 'DRIVER_ARRIVED':
+          _soundService.playNewStateSound();
+          _handleDriverArrived();
+          break;
+        case 'RIDE_STARTED':
+          _soundService.playNewStateSound();
+          _handleRideStarted();
+          break;
+        case 'END_RIDE_OTP_GENERATED':
+          _soundService.playNewStateSound();
+          final payload = decoded['payload'];
+          _handleEndRideOtp(payload['otp']);
+          break;
+        case 'RIDE_COMPLETED':
+          _handleRideCompleted();
+          break;
+      }
+  }
+
+  void _handleWebSocketDisconnect() {
+    if (!mounted) return;
+    _channel = null; 
+    setState(() => _isConnecting = false);
+    if (_reconnectAttempts < 5) {
+      final waitSeconds = 2 * (_reconnectAttempts + 1);
+      Future.delayed(Duration(seconds: waitSeconds), () {
+        if (mounted) {
+          _reconnectAttempts++;
+          _connectToWebSocket();
+        }
+      });
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Connection lost. Please check your internet.'), backgroundColor: Colors.red),
+      );
+    }
+  }
+
+  void _updateDriverMarker(LatLng position, double bearing) {
+    if (!mounted || _driverIcon == null) return;
+    
+    final marker = Marker(
+      markerId: const MarkerId('driver'), 
+      position: position, 
+      icon: _driverIcon!, 
+      anchor: const Offset(0.5, 0.5), 
+      rotation: bearing,
+      flat: true
+    );
+
+    setState(() { 
+      _markers[const MarkerId('driver')] = marker; 
+    });
+
+    _updatePolylineForDriverLocation(position);
+
+    _mapController.future.then((controller) => controller.animateCamera(CameraUpdate.newLatLng(position)));
+  }
+
+  void _updatePolylineForDriverLocation(LatLng driverLocation) {
+    if (_currentPolylinePoints.isEmpty) return;
+    
+    final distance = latlong.Distance();
+    int closestPointIndex = -1;
+    double minDistance = double.infinity;
+
+    for (int i = 0; i < _currentPolylinePoints.length; i++) {
+      final point = _currentPolylinePoints[i];
+      final d = distance.as(
+        latlong.LengthUnit.Meter,
+        latlong.LatLng(driverLocation.latitude, driverLocation.longitude),
+        latlong.LatLng(point.latitude, point.longitude),
+      );
+      if (d < minDistance) {
+        minDistance = d;
+        closestPointIndex = i;
+      }
+    }
+    
+    if (closestPointIndex != -1) {
+      setState(() {
+        _currentPolylinePoints = _currentPolylinePoints.sublist(closestPointIndex);
+        _drawPolyline(_currentPolylinePoints, 'active_route', _isDriverArrived ? const Color(0xFF27b4ad) : Colors.amber.shade700);
+      });
+    }
   }
 
   void _handleDriverArrived({bool fromInit = false}) {
     if (_isDriverArrived) return;
     
+    setState(() {
+      _polylines.removeWhere((p) => p.polylineId.value == 'active_route');
+      _currentPolylinePoints = List.from(_rideRoutePolylinePoints);
+    });
+    _drawPolyline(_currentPolylinePoints, 'active_route', const Color(0xFF27b4ad));
+
+
     if (!fromInit) {
       _rideData['initial_state'] = RideState.driverArrived.toString();
       _rideStateService.saveRideState(RideState.driverArrived, _rideData);
@@ -117,19 +293,68 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
       );
     }
 
-    setState(() {
-      _isDriverArrived = true;
-      _rideStatusText = "Captain is waiting for pickup";
-    });
+    if (mounted) {
+       setState(() {
+        _isDriverArrived = true;
+        _rideStatusText = "Captain is waiting for pickup";
+      });
+    }
     
     _startWaitingTimer();
+  }
+
+  void _handleRideStarted({bool fromInit = false}) {
+    if (!fromInit) {
+      _rideData['initial_state'] = RideState.rideStarted.toString();
+      _rideStateService.saveRideState(RideState.rideStarted, _rideData);
+       _notificationService.showNotification(
+        id: _rideData['rideId'].hashCode,
+        title: 'Ride Started!',
+        body: 'Your ride is now in progress. Enjoy your trip!',
+      );
+    }
+    if (mounted) {
+      setState(() {
+        _isRideStarted = true;
+        _isDriverArrived = false;
+        _waitingTimer?.cancel();
+        _rideStatusText = "You are on your way!";
+      });
+    }
+  }
+
+  void _handleEndRideOtp(String otp) {
+    _rideStateService.saveRideState(RideState.rideStarted, {..._rideData, 'end_ride_otp': otp});
+     _notificationService.showNotification(
+        id: _rideData['rideId'].hashCode + 1,
+        title: 'Almost there!',
+        body: 'Share the OTP with your driver to end the ride.',
+      );
+    if (mounted) {
+      setState(() {
+        _endRideOtp = otp;
+        _rideStatusText = "Share OTP to end ride";
+      });
+    }
+  }
+
+  void _handleRideCompleted() {
+    _rideStateService.clearRideState();
+     _notificationService.showNotification(
+        id: _rideData['rideId'].hashCode + 2,
+        title: 'Ride Completed!',
+        body: 'Thank you for choosing RideFast.',
+      );
+    if (mounted) {
+      Navigator.of(context).pushReplacementNamed('/ride-completed', arguments: _rideData);
+    }
   }
 
   void _startWaitingTimer() {
     _waitingTimer?.cancel();
     _waitingTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (_waitingSeconds > 0) {
-        setState(() { _waitingSeconds--; });
+        if (mounted) setState(() { _waitingSeconds--; });
       } else {
         timer.cancel();
       }
@@ -139,7 +364,7 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   void _addMarker({required String id, required LatLng position, required BitmapDescriptor icon}) {
     final markerId = MarkerId(id);
     final marker = Marker(markerId: markerId, position: position, icon: icon);
-    setState(() { _markers[markerId] = marker; });
+    if (mounted) setState(() { _markers[markerId] = marker; });
   }
 
   Color _getTimerColor() {
@@ -149,6 +374,7 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   }
   
   void _onCancelRide() async {
+    _soundService.playRideCancelledSound();
     await _rideStateService.clearRideState();
     if (mounted) {
       Navigator.of(context).pushNamedAndRemoveUntil('/dashboard', (route) => false);
@@ -159,6 +385,7 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   void dispose() {
     _channel?.sink.close();
     _waitingTimer?.cancel();
+    _soundService.dispose();
     super.dispose();
   }
 
@@ -166,7 +393,7 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
   Widget build(BuildContext context) {
     final driver = _rideData['driver'] as Map<String, dynamic>? ?? {};
     final vehicle = _rideData['vehicle'] as Map<String, dynamic>? ?? {};
-    final otp = _rideData['otp'] as String? ?? '----';
+    final startOtp = _rideData['otp'] as String? ?? '----';
     final driverName = driver['name'] as String? ?? 'Driver';
     final driverRating = (driver['rating'] as num?)?.toDouble() ?? 5.0;
     final driverPhotoUrl = driver['photo_url'] as String?;
@@ -180,13 +407,17 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
       child: Scaffold(
         body: Stack(
           children: [
-            GoogleMap(
-              initialCameraPosition: const CameraPosition(target: LatLng(18.5204, 73.8567), zoom: 14),
-              onMapCreated: (controller) => _mapController.complete(controller),
-              markers: Set<Marker>.of(_markers.values),
-              myLocationButtonEnabled: false,
-              zoomControlsEnabled: false,
-            ),
+             if (_initialCameraPosition == null)
+              const Center(child: CircularProgressIndicator())
+            else
+              GoogleMap(
+                initialCameraPosition: _initialCameraPosition!,
+                onMapCreated: (controller) => _mapController.complete(controller),
+                markers: Set<Marker>.of(_markers.values),
+                polylines: _polylines,
+                myLocationButtonEnabled: false,
+                zoomControlsEnabled: false,
+              ),
             DraggableScrollableSheet(
               initialChildSize: 0.5, minChildSize: 0.5, maxChildSize: 0.75,
               builder: (context, scrollController) {
@@ -224,27 +455,16 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
                           ],
                         ),
                       ),
-                      Container(
-                        padding: const EdgeInsets.all(16),
-                        decoration: BoxDecoration(color: const Color(0xFFF0FDFA), borderRadius: BorderRadius.circular(12)),
-                        child: Row(
-                          children: [
-                            Expanded(
-                              child: Text('Start your order with PIN', style: GoogleFonts.plusJakartaSans(fontWeight: FontWeight.w600, fontSize: 16)),
-                            ),
-                            const SizedBox(width: 8),
-                            Row(
-                              mainAxisSize: MainAxisSize.min,
-                              children: otp.split('').map((digit) => Container(
-                                margin: const EdgeInsets.symmetric(horizontal: 4),
-                                padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-                                decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 5)]),
-                                child: Text(digit, style: GoogleFonts.robotoMono(fontSize: 20, fontWeight: FontWeight.bold)),
-                              )).toList(),
-                            )
-                          ],
+                       if (!_isRideStarted)
+                        _buildOtpContainer(
+                          label: 'Start your order with PIN', 
+                          otp: startOtp
                         ),
-                      ),
+                      if (_isRideStarted && _endRideOtp != null)
+                         _buildOtpContainer(
+                          label: 'Share PIN to end ride', 
+                          otp: _endRideOtp!
+                        ),
                       const SizedBox(height: 20),
                       ListTile(
                         contentPadding: EdgeInsets.zero,
@@ -266,11 +486,12 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
                           ListTile(leading: const Icon(Icons.my_location, color: Colors.green), title: const Text('Pickup from'), subtitle: Text(pickupAddress)),
                           ListTile(leading: const Icon(Icons.location_on, color: Colors.red), title: const Text('Dropping at'), subtitle: Text(dropoffAddress)),
                           const SizedBox(height: 10),
-                          TextButton.icon(
-                            icon: const Icon(Icons.cancel_outlined, color: Colors.red),
-                            label: Text('Cancel Ride', style: GoogleFonts.plusJakartaSans(color: Colors.red, fontWeight: FontWeight.bold)),
-                            onPressed: _onCancelRide,
-                          ),
+                          if (!_isRideStarted)
+                            TextButton.icon(
+                              icon: const Icon(Icons.cancel_outlined, color: Colors.red),
+                              label: Text('Cancel Ride', style: GoogleFonts.plusJakartaSans(color: Colors.red, fontWeight: FontWeight.bold)),
+                              onPressed: _onCancelRide,
+                            ),
                         ],
                       ),
                     ],
@@ -278,10 +499,47 @@ class _RideOnTheWayScreenState extends State<RideOnTheWayScreen> {
                 );
               },
             ),
+             if (_channel == null && !_isConnecting)
+              Align(
+                alignment: Alignment.topCenter,
+                child: Container(
+                  width: double.infinity,
+                  color: Colors.amber[700],
+                  padding: const EdgeInsets.all(8.0),
+                  child: const Text(
+                    'Reconnecting...',
+                    textAlign: TextAlign.center,
+                    style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ),
           ],
         ),
       ),
     );
   }
-}
 
+  Widget _buildOtpContainer({required String label, required String otp}) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(color: const Color(0xFFF0FDFA), borderRadius: BorderRadius.circular(12)),
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(label, style: GoogleFonts.plusJakartaSans(fontWeight: FontWeight.w600, fontSize: 16)),
+          ),
+          const SizedBox(width: 8),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: otp.split('').map((digit) => Container(
+              margin: const EdgeInsets.symmetric(horizontal: 4),
+              padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+              decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8), boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.05), blurRadius: 5)]),
+              child: Text(digit, style: GoogleFonts.robotoMono(fontSize: 20, fontWeight: FontWeight.bold)),
+            )).toList(),
+          )
+        ],
+      ),
+    );
+  }
+}

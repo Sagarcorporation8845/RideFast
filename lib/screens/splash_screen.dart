@@ -37,7 +37,7 @@ class _SplashScreenState extends State<SplashScreen> {
         final data = activeRide['data'];
 
         // If a driver is assigned or has arrived, resume the ride screen
-        if (state == RideState.driverAssigned.toString() || state == RideState.driverArrived.toString()) {
+        if (state == RideState.driverAssigned.toString() || state == RideState.driverArrived.toString() || state == RideState.rideStarted.toString()) {
           Navigator.of(context).pushReplacementNamed('/ride-on-the-way', arguments: data);
           return;
         }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:ridefast/screens/dashboard_screen.dart';
+import 'package:ridefast/screens/ride_completed_screen.dart';
 import 'package:ridefast/screens/ride_on_the_way_screen.dart';
 import 'package:ridefast/screens/location_search_screen.dart';
 import 'package:ridefast/screens/onboarding_screen.dart';
@@ -57,8 +58,8 @@ class MyApp extends StatelessWidget {
         '/about': (context) => const AboutUsScreen(),
         '/edit-profile': (context) => const EditProfileScreen(),
         '/ride-on-the-way': (context) => const RideOnTheWayScreen(),
+        '/ride-completed': (context) => const RideCompletedScreen(),
       },
     );
   }
 }
-

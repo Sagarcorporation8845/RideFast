@@ -2,7 +2,7 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 // Defines the possible states of an active ride
-enum RideState { none, searching, driverAssigned, driverArrived }
+enum RideState { none, searching, driverAssigned, driverArrived, rideStarted }
 
 class RideStateService {
   static const _rideStateKey = 'active_ride_state';
